@@ -1,0 +1,11 @@
+{
+  "expo": {
+    "name": "A'Lot For Park",
+    "slug": "alot-for-park",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "splash": {"backgroundColor": "#0b1220"},
+    "android": {"package": "com.alotforpark.app"}
+  }
+}

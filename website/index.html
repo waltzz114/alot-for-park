@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#0b1220">
+  <title>A'Lot For Park</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="nav">
+    <a class="brand" href="#"><span class="logo">A</span><span><b>'A'Lot For Park</b><small>SMART PARKING</small></span></a>
+    <span class="live"><i></i> LIVE STATUS</span>
+  </header>
+  <main class="wrap">
+    <section class="hero">
+      <div><p class="eyebrow">PARK SMARTER</p><h1>Your space.<br><em>Without the search.</em></h1>
+      <p class="muted">Find an available slot and reserve it before you arrive.</p></div>
+      <div class="hero-icon">P</div>
+    </section>
+    <section class="summary">
+      <div><small>AVAILABLE SLOTS</small><strong id="availableCount">—</strong><span>out of 4 spaces</span></div>
+      <div class="summary-mark">⌖</div>
+    </section>
+    <div class="section-head"><div><p class="eyebrow">LIVE PARKING</p><h2>Choose your slot</h2></div><button class="refresh" id="refresh">↻ Refresh</button></div>
+    <section id="slots" class="slots"><div class="loading">Loading parking status…</div></section>
+    <p id="notice" class="notice" role="status"></p>
+    <section class="info"><b>Reservation fee</b><strong>₹1.00</strong><small>One-time fee per booking · Payment required to confirm</small></section>
+    <footer>© A'Lot For Park · Live availability depends on sensor connectivity.</footer>
+  </main>
+  <script src="/script.js"></script>
+</body></html>
