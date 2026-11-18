@@ -1,4 +1,5 @@
 require("dotenv").config();
+
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
@@ -39,18 +40,49 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "..", "website")));
 
+// ==========================================
+// ESP32 DEVICE AUTHENTICATION
+// ==========================================
+
 function deviceAuth(req, res, next) {
   const expected = process.env.ESP32_DEVICE_TOKEN;
   const supplied = req.get("x-device-token");
 
   if (!expected || !supplied || supplied !== expected) {
-    return res.status(401).json({ error: "Unauthorized device" });
+    return res.status(401).json({
+      error: "Unauthorized device"
+    });
   }
 
   next();
 }
 
-// Expire unpaid booking holds after 10 minutes.
+// ==========================================
+// CUSTOMER ID VALIDATION
+// ==========================================
+
+function getCustomerId(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const customerId = value.trim();
+
+  if (
+    customerId.length < 10 ||
+    customerId.length > 100 ||
+    !/^[a-zA-Z0-9_-]+$/.test(customerId)
+  ) {
+    return null;
+  }
+
+  return customerId;
+}
+
+// ==========================================
+// EXPIRE UNPAID BOOKINGS
+// ==========================================
+
 async function expireUnpaidBookings(client = pool) {
   await client.query(`
     UPDATE bookings
@@ -60,7 +92,10 @@ async function expireUnpaidBookings(client = pool) {
   `);
 }
 
-// UPDATED: Includes active PENDING_PAYMENT bookings.
+// ==========================================
+// GET PARKING SLOT STATES
+// ==========================================
+
 async function getSlotStates(client = pool) {
   await expireUnpaidBookings(client);
 
@@ -114,12 +149,17 @@ async function getSlotStates(client = pool) {
         : row.pending_payment
           ? "PENDING_PAYMENT"
           : "AVAILABLE",
+
     occupied: row.occupied,
     reserved: row.reserved,
     pendingPayment: row.pending_payment,
     bookingId: row.booking_id
   }));
 }
+
+// ==========================================
+// HEALTH CHECK
+// ==========================================
 
 app.get("/api/health", (req, res) => {
   res.json({
@@ -128,6 +168,10 @@ app.get("/api/health", (req, res) => {
   });
 });
 
+// ==========================================
+// GET PARKING SLOTS
+// ==========================================
+
 app.get("/api/slots", async (req, res) => {
   try {
     res.json({
@@ -135,17 +179,30 @@ app.get("/api/slots", async (req, res) => {
     });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Could not load slots" });
+
+    res.status(500).json({
+      error: "Could not load slots"
+    });
   }
 });
 
-// Create booking and Razorpay order.
+// ==========================================
+// CREATE BOOKING AND RAZORPAY ORDER
+// ==========================================
+
 app.post("/api/bookings", async (req, res) => {
   const slotNumber = Number(req.body.slot);
+  const customerId = getCustomerId(req.body.customerId);
 
   if (![1, 2, 3, 4].includes(slotNumber)) {
     return res.status(400).json({
       error: "Choose a valid slot (1–4)"
+    });
+  }
+
+  if (!customerId) {
+    return res.status(400).json({
+      error: "A valid customer ID is required"
     });
   }
 
@@ -171,11 +228,16 @@ app.post("/api/bookings", async (req, res) => {
     );
 
     if (!slotResult.rowCount) {
-      throw new Error("Slot not found");
+      await client.query("ROLLBACK");
+
+      return res.status(404).json({
+        error: "Slot not found"
+      });
     }
 
     if (slotResult.rows[0].occupied) {
       await client.query("ROLLBACK");
+
       return res.status(409).json({
         error: "This slot is already occupied."
       });
@@ -196,6 +258,7 @@ app.post("/api/bookings", async (req, res) => {
 
     if (active.rowCount) {
       await client.query("ROLLBACK");
+
       return res.status(409).json({
         error: "This slot is already reserved or being booked."
       });
@@ -209,13 +272,21 @@ app.post("/api/bookings", async (req, res) => {
 
     await client.query(
       `INSERT INTO bookings
-       (id, slot_number, status, amount_paise, expires_at)
-       VALUES ($1, $2, 'PENDING_PAYMENT', $3, $4)`,
+       (
+         id,
+         slot_number,
+         status,
+         amount_paise,
+         expires_at,
+         customer_id
+       )
+       VALUES ($1, $2, 'PENDING_PAYMENT', $3, $4, $5)`,
       [
         bookingId,
         slotNumber,
         RESERVATION_FEE_PAISE,
-        expiresAt
+        expiresAt,
+        customerId
       ]
     );
 
@@ -270,14 +341,78 @@ app.post("/api/bookings", async (req, res) => {
   }
 });
 
-// Check booking status.
+// ==========================================
+// MY BOOKINGS
+// GET /api/bookings?customerId=YOUR_CUSTOMER_ID
+// ==========================================
+
+app.get("/api/bookings", async (req, res) => {
+  const customerId = getCustomerId(req.query.customerId);
+
+  if (!customerId) {
+    return res.status(400).json({
+      error: "A valid customer ID is required"
+    });
+  }
+
+  try {
+    await expireUnpaidBookings();
+
+    const result = await pool.query(
+      `SELECT
+         id,
+         slot_number,
+         status,
+         amount_paise,
+         created_at,
+         expires_at,
+         paid_at,
+         razorpay_payment_id
+       FROM bookings
+       WHERE customer_id = $1
+       ORDER BY created_at DESC`,
+      [customerId]
+    );
+
+    res.json({
+      bookings: result.rows.map(b => ({
+        id: b.id,
+        slot: b.slot_number,
+        status: b.status,
+        amount: b.amount_paise,
+        createdAt: b.created_at,
+        expiresAt: b.expires_at,
+        paidAt: b.paid_at,
+        paymentId: b.razorpay_payment_id
+      }))
+    });
+
+  } catch (err) {
+    console.error(err);
+
+    res.status(500).json({
+      error: "Could not load your bookings"
+    });
+  }
+});
+
+// ==========================================
+// CHECK INDIVIDUAL BOOKING STATUS
+// ==========================================
+
 app.get("/api/bookings/:id", async (req, res) => {
   try {
     await expireUnpaidBookings();
 
     const result = await pool.query(
-      `SELECT id, slot_number, status, amount_paise,
-              created_at, expires_at, paid_at
+      `SELECT
+         id,
+         slot_number,
+         status,
+         amount_paise,
+         created_at,
+         expires_at,
+         paid_at
        FROM bookings
        WHERE id = $1`,
       [req.params.id]
@@ -305,13 +440,17 @@ app.get("/api/bookings/:id", async (req, res) => {
 
   } catch (err) {
     console.error(err);
+
     res.status(500).json({
       error: "Could not check booking"
     });
   }
 });
 
-// Verify Razorpay payment.
+// ==========================================
+// VERIFY RAZORPAY PAYMENT
+// ==========================================
+
 app.post("/api/payments/verify", async (req, res) => {
   const {
     bookingId,
@@ -403,6 +542,7 @@ app.post("/api/payments/verify", async (req, res) => {
         locked.rows[0].status === "OCCUPIED"
       ) {
         await client.query("COMMIT");
+
         return res.json({
           ok: true,
           status: locked.rows[0].status
@@ -411,6 +551,7 @@ app.post("/api/payments/verify", async (req, res) => {
 
       if (locked.rows[0].status !== "PENDING_PAYMENT") {
         await client.query("ROLLBACK");
+
         return res.status(409).json({
           error: "Booking hold expired. Contact the parking operator for payment assistance."
         });
@@ -439,13 +580,17 @@ app.post("/api/payments/verify", async (req, res) => {
 
   } catch (err) {
     console.error(err);
+
     res.status(500).json({
       error: "Payment verification could not be completed"
     });
   }
 });
 
-// ESP32 sensor update.
+// ==========================================
+// ESP32 SENSOR UPDATE
+// ==========================================
+
 app.post("/api/esp32/status", deviceAuth, async (req, res) => {
   const slots = req.body && req.body.slots;
 
@@ -484,7 +629,8 @@ app.post("/api/esp32/status", deviceAuth, async (req, res) => {
 
       await client.query(
         `UPDATE slots
-         SET occupied = $1, updated_at = NOW()
+         SET occupied = $1,
+             updated_at = NOW()
          WHERE slot_number = $2`,
         [occupied, slot]
       );
@@ -520,47 +666,56 @@ app.post("/api/esp32/status", deviceAuth, async (req, res) => {
   }
 });
 
-// OLED display data.
+// ==========================================
+// OLED DISPLAY DATA
+// ==========================================
+
 app.get("/api/esp32/display", deviceAuth, async (req, res) => {
   try {
     res.json({
       slots: await getSlotStates(),
       updatedAt: new Date().toISOString()
     });
+
   } catch (err) {
     console.error(err);
+
     res.status(500).json({
       error: "Could not load OLED display data"
     });
   }
 });
 
-// Hosted Razorpay checkout.
+// ==========================================
+// HOSTED RAZORPAY CHECKOUT
+// ==========================================
+
 app.get("/checkout/:bookingId", async (req, res) => {
-  if (!razorpayReady) {
-    return res.status(503).send(
-      "Payment gateway is not configured."
+  try {
+    if (!razorpayReady) {
+      return res.status(503).send(
+        "Payment gateway is not configured."
+      );
+    }
+
+    const result = await pool.query(
+      "SELECT * FROM bookings WHERE id = $1",
+      [req.params.bookingId]
     );
-  }
 
-  const result = await pool.query(
-    "SELECT * FROM bookings WHERE id = $1",
-    [req.params.bookingId]
-  );
+    if (!result.rowCount) {
+      return res.status(404).send("Booking not found.");
+    }
 
-  if (!result.rowCount) {
-    return res.status(404).send("Booking not found.");
-  }
+    const booking = result.rows[0];
 
-  const booking = result.rows[0];
+    if (booking.status !== "PENDING_PAYMENT") {
+      return res.send(
+        "This booking is no longer awaiting payment. You can return to the A'Lot For Park app."
+      );
+    }
 
-  if (booking.status !== "PENDING_PAYMENT") {
-    return res.send(
-      "This booking is no longer awaiting payment. You can return to the A'Lot For Park app."
-    );
-  }
-
-  res.type("html").send(`<!doctype html>
+    res.type("html").send(`<!doctype html>
 <html>
 <head>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -581,6 +736,7 @@ button{background:#42d6b0;color:#071a17;border:0;padding:14px 22px;border-radius
 <button id="pay">Pay ₹1 and reserve</button>
 <p id="msg"></p>
 </div>
+
 <script>
 const options = {
   key: ${JSON.stringify(process.env.RAZORPAY_KEY_ID)},
@@ -589,13 +745,17 @@ const options = {
   name: "A'Lot For Park",
   description: "Parking reservation fee",
   order_id: ${JSON.stringify(booking.razorpay_order_id)},
+
   handler: async function(response) {
-    document.getElementById("msg").textContent = "Verifying payment...";
+    document.getElementById("msg").textContent =
+      "Verifying payment...";
 
     try {
       const r = await fetch("/api/payments/verify", {
         method: "POST",
-        headers: {"Content-Type": "application/json"},
+        headers: {
+          "Content-Type": "application/json"
+        },
         body: JSON.stringify({
           bookingId: ${JSON.stringify(booking.id)},
           razorpay_order_id: response.razorpay_order_id,
@@ -616,6 +776,7 @@ const options = {
         "Could not verify payment. Please contact the parking operator.";
     }
   },
+
   modal: {
     ondismiss: function() {
       document.getElementById("msg").textContent =
@@ -630,13 +791,27 @@ document.getElementById("pay").onclick = () => {
 </script>
 </body>
 </html>`);
+
+  } catch (err) {
+    console.error(err);
+
+    res.status(500).send("Could not open checkout.");
+  }
 });
+
+// ==========================================
+// WEBSITE FALLBACK
+// ==========================================
 
 app.get("*", (req, res) => {
   res.sendFile(
     path.join(__dirname, "..", "website", "index.html")
   );
 });
+
+// ==========================================
+// START SERVER
+// ==========================================
 
 app.listen(PORT, () => {
   console.log(`A'Lot For Park API running on port ${PORT}`);
